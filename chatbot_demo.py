@@ -1,8 +1,11 @@
 # chatbot_demo.py
-import os
-import re
+# Streamlit UI for BSU Graduate Advisor AI
+
 import streamlit as st
-from full_rag import ResponseEngine
+from full_rag_fixed import ResponseEngine
+import os
+import json
+
 
 # ==================== PAGE CONFIGURATION ====================
 
@@ -41,6 +44,7 @@ with col2:
     st.title("BSU Graduate Advisor AI")
     st.caption("Your assistant for BSU CS graduate advising")
 
+
 # ==================== API TOKEN CHECK ====================
 
 if not os.getenv("BSU_API_KEY"):
@@ -48,10 +52,12 @@ if not os.getenv("BSU_API_KEY"):
     st.info("Please create a .env file with your BSU API key inside it.")
     st.stop()
 
-# ==================== SESSION STATE INIT ====================
+
+# ==================== SESSION STATE INITIALIZATION ====================
 
 if "mode" not in st.session_state:
-    st.session_state.mode = "welcome"  # "welcome" | "guided" | "explore"
+    # "welcome" | "explore" | "guided"
+    st.session_state.mode = "welcome"
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -60,23 +66,14 @@ if "generator" not in st.session_state:
     with st.spinner("Initializing AI assistant..."):
         st.session_state.generator = ResponseEngine()
 
-# Guided state
+# Guided mode state
 if "guided_step" not in st.session_state:
-    st.session_state.guided_step = 0
+    st.session_state.guided_step = 0  # 0..6
 if "guided_answers" not in st.session_state:
-    st.session_state.guided_answers = []
+    st.session_state.guided_answers = []  # list of 7 strings
+if "guided_questions" not in st.session_state:
+    st.session_state.guided_questions = []
 
-# Explore follow-up controller state
-if "pending_followup" not in st.session_state:
-    st.session_state.pending_followup = None  # dict or None
-if "last_followup_decision" not in st.session_state:
-    st.session_state.last_followup_decision = ""
-if "last_routed_query" not in st.session_state:
-    st.session_state.last_routed_query = ""
-
-# Debug toggle
-if "debug_followups" not in st.session_state:
-    st.session_state.debug_followups = True
 
 # ==================== GUIDED QUESTIONS (FINAL) ====================
 
@@ -84,292 +81,173 @@ GUIDED_QUESTIONS = [
     "What is your CS graduate program or emphasis? (Examples: MS in CS, AI emphasis, Cybersecurity emphasis, Systems emphasis)",
     "What are your top 2 to 3 research interests right now? (Examples: NLP, ML, HCI, security, systems, CV)",
     "What graduate or senior-level courses have you taken that you liked? List a few.",
-    "What was your bachelor’s degree and what kind of projects did you do in undergrad?",
+    "What was your bachelor's degree and what kind of projects did you do in undergrad?",
     "What are your strongest skills or tools? (Languages, frameworks, math, writing, systems, ML, etc.)",
     "What topics or project types do you NOT want?",
     "What is your goal for grad school? (Thesis vs project, research vs industry, PhD interest, publish, build product)",
 ]
 
+
 # ==================== HELPERS ====================
-
-
-YES_SET = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "help me", "yes help me", "yes, help me"}
-NO_SET = {"no", "n", "nope", "nah"}
-
 
 def reset_to_welcome():
     st.session_state.mode = "welcome"
     st.session_state.messages = []
     st.session_state.guided_step = 0
     st.session_state.guided_answers = []
-    st.session_state.pending_followup = None
-    st.session_state.last_followup_decision = ""
-    st.session_state.last_routed_query = ""
-
-
-def strip_followup_tag(text: str) -> str:
-    # Removes any hidden followup tag if present
-    return re.sub(r"\[FOLLOWUP[^\]]*\]\s*$", "", text or "").rstrip()
-
-
-def parse_followup_tag(text: str):
-    """
-    Optional hidden tag format:
-      [FOLLOWUP type=faculty_recs topic=robotics entity=Tim_Andersen]
-    Values can be omitted.
-    """
-    if not text:
-        return None
-    m = re.search(r"\[FOLLOWUP\s+([^\]]+)\]\s*$", text.strip())
-    if not m:
-        return None
-    payload = m.group(1).strip()
-    meta = {}
-    for part in payload.split():
-        if "=" in part:
-            k, v = part.split("=", 1)
-            meta[k.strip()] = v.strip()
-    if not meta.get("type"):
-        return None
-    # decode underscores
-    if "entity" in meta:
-        meta["entity"] = meta["entity"].replace("_", " ")
-    if "topic" in meta:
-        meta["topic"] = meta["topic"].replace("_", " ")
-    return meta
-
-
-def normalize_interest_text(s: str) -> str:
-    """
-    Converts "I like AI" -> "AI", "I'm interested in deep learning" -> "deep learning"
-    Very small normalization, not aggressive.
-    """
-    if not s:
-        return ""
-    t = s.strip()
-    t_low = t.lower()
-    prefixes = [
-        "i like ",
-        "i love ",
-        "im interested in ",
-        "i'm interested in ",
-        "i am interested in ",
-        "i want ",
-        "im into ",
-        "i'm into ",
-        "interested in ",
-    ]
-    for p in prefixes:
-        if t_low.startswith(p):
-            return t[len(p):].strip()
-    return t
-
-
-def get_last_user_nontrivial(history):
-    for m in reversed(history):
-        if m.get("role") != "user":
-            continue
-        txt = (m.get("content") or "").strip()
-        if not txt:
-            continue
-        low = txt.lower().strip()
-        if low in YES_SET or low in NO_SET:
-            continue
-        return txt
-    return ""
-
-
-def detect_followup_meta_from_assistant(assistant_text: str, history):
-    """
-    Sets pending followup based on assistant response content.
-    Uses explicit [FOLLOWUP ...] tag if present, else uses heuristics.
-    """
-    raw = assistant_text or ""
-    tagged = parse_followup_tag(raw)
-    if tagged:
-        return {
-            "type": tagged.get("type"),
-            "topic": tagged.get("topic"),
-            "entity": tagged.get("entity"),
-            "asked_text": strip_followup_tag(raw),
+    if "generator" in st.session_state:
+        st.session_state.generator.conversation_memory = {
+            "last_query": None,
+            "last_retrieved": None,
+            "pending_concept_query": None,
+            "active_faculty_name": None,
         }
 
-    text = raw.lower()
 
-    # Outreach question offer
-    if ("prepare questions" in text or "reach out" in text) and ("dr." in text or "dr " in text):
-        # try to extract "Dr. First Last"
-        m = re.search(r"dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)", raw)
-        entity = m.group(1).strip() if m else None
-        if entity:
-            return {"type": "outreach", "entity": entity, "topic": None, "asked_text": raw}
+def build_student_profile_text(answers):
+    # Force the classifier into "new_professor" by making the intent explicit up front.
+    # Keep the profile structured and keyword-rich, but avoid "TASK:" formatting that can confuse classification.
 
-    # Faculty recommendation offer
-    if "recommend" in text and "faculty" in text:
-        last_user = get_last_user_nontrivial(history)
-        topic = normalize_interest_text(last_user)
-        if topic:
-            return {"type": "faculty_recs", "entity": None, "topic": topic, "asked_text": raw}
-        return {"type": "faculty_recs", "entity": None, "topic": None, "asked_text": raw}
-
-    # Topic refinement offer, common phrasing
-    if "specific area" in text or "which area" in text or "what specific type" in text:
-        last_user = get_last_user_nontrivial(history)
-        topic = normalize_interest_text(last_user)
-        if topic:
-            return {"type": "topic_refine", "entity": None, "topic": topic, "asked_text": raw}
-        return {"type": "topic_refine", "entity": None, "topic": None, "asked_text": raw}
-
-    return None
-
-
-def is_clear_interrupt(user_text: str) -> bool:
-    """
-    Detect obvious topic switches. This is intentionally conservative.
-    If it returns True, we treat it as a new request.
-    """
-    if not user_text:
-        return False
-    t = user_text.strip().lower()
-
-    # User explicitly signals a new topic
-    explicit = ["new question", "different topic", "separate question", "unrelated", "by the way"]
-    if any(t.startswith(x) for x in explicit):
-        return True
-
-    # Some clearly different-life domains (expand if needed)
-    unrelated_keywords = [
-        "cpt", "opt", "visa", "i-20", "i-94", "tax", "1098", "resume", "cover letter",
-        "salary", "job offer", "interview", "rent", "apartment", "car", "gym",
-    ]
-    if any(k in t for k in unrelated_keywords):
-        return True
-
-    return False
-
-
-def route_explore_message(user_text: str, history):
-    """
-    Decide whether user_text is answering a pending follow-up or starting a new request.
-    Returns (routed_query, used_pending: bool)
-    """
-    pending = st.session_state.pending_followup
-    st.session_state.last_followup_decision = ""
-    st.session_state.last_routed_query = ""
-
-    if not pending:
-        st.session_state.last_followup_decision = "no pending follow-up"
-        st.session_state.last_routed_query = user_text
-        return user_text, False
-
-    # If user clearly interrupts, drop pending
-    if is_clear_interrupt(user_text):
-        st.session_state.pending_followup = None
-        st.session_state.last_followup_decision = "interrupt (clear topic switch)"
-        st.session_state.last_routed_query = user_text
-        return user_text, False
-
-    u = (user_text or "").strip()
-    u_low = u.lower()
-
-    # If the reply is a short confirmation, treat as continuing the follow-up
-    if u_low in YES_SET or u_low in NO_SET or len(u_low.split()) <= 3:
-        # Continue unless it is a clear new question with '?'
-        # Short questions like "who?" still should likely continue.
-        decision = "continue (short reply)"
-        follow_type = pending.get("type")
-
-        if follow_type == "outreach":
-            entity = pending.get("entity") or "the professor"
-            routed = (
-                f"Draft 6 to 8 concise outreach questions I can email to Dr. {entity} "
-                f"to ask about advising and project/capstone fit. Keep them practical and professional."
-            )
-            st.session_state.last_followup_decision = decision + " -> outreach"
-            st.session_state.last_routed_query = routed
-            st.session_state.pending_followup = None
-            return routed, True
-
-        if follow_type in {"faculty_recs", "topic_refine"}:
-            topic = pending.get("topic") or normalize_interest_text(get_last_user_nontrivial(history))
-            if not topic:
-                topic = "the topic we were just discussing"
-            # If user said "no", treat as interrupt and ask what they want next
-            if u_low in NO_SET:
-                routed = "Okay. What topic should I match BSU CS faculty to?"
-                st.session_state.last_followup_decision = "continue (short reply) -> user declined"
-                st.session_state.last_routed_query = routed
-                st.session_state.pending_followup = {"type": "topic_refine", "topic": None, "entity": None, "asked_text": ""}
-                return routed, True
-
-            # Default: recommend faculty for topic
-            routed = f"BSU faculty that work with {topic}"
-            st.session_state.last_followup_decision = decision + " -> faculty recs"
-            st.session_state.last_routed_query = routed
-            st.session_state.pending_followup = None
-            return routed, True
-
-        # Fallback: treat as new request
-        st.session_state.last_followup_decision = "interrupt (unknown follow-up type)"
-        st.session_state.last_routed_query = user_text
-        st.session_state.pending_followup = None
-        return user_text, False
-
-    # For longer replies, decide by overlap with pending topic/entity
-    follow_type = pending.get("type")
-    topic = (pending.get("topic") or "").lower()
-    entity = (pending.get("entity") or "").lower()
-    u_low = u_low
-
-    overlap = False
-    if topic and topic in u_low:
-        overlap = True
-    if entity and entity in u_low:
-        overlap = True
-
-    if overlap:
-        # Continue follow-up and enrich topic with the new detail
-        if follow_type in {"faculty_recs", "topic_refine"}:
-            base = pending.get("topic") or ""
-            routed = f"Recommend BSU CS faculty based on: {base}. Details: {u}"
-            st.session_state.last_followup_decision = "continue (topic/entity overlap)"
-            st.session_state.last_routed_query = routed
-            st.session_state.pending_followup = None
-            return routed, True
-
-        if follow_type == "outreach":
-            ent = pending.get("entity") or "the professor"
-            routed = (
-                f"Draft 6 to 8 concise outreach questions I can email to Dr. {ent}. "
-                f"User preferences for the questions: {u}"
-            )
-            st.session_state.last_followup_decision = "continue (topic/entity overlap) -> outreach"
-            st.session_state.last_routed_query = routed
-            st.session_state.pending_followup = None
-            return routed, True
-
-    # If no overlap, treat as interrupt (new request)
-    st.session_state.last_followup_decision = "interrupt (no overlap with follow-up)"
-    st.session_state.last_routed_query = user_text
-    st.session_state.pending_followup = None
-    return user_text, False
-
-
-def build_guided_profile_query(answers):
-    # Force the classifier into the recommendation path by making intent explicit up front.
     return f"""Recommend 1 to 3 BSU CS faculty advisors based on the student profile below.
-First, write a short paragraph summarizing the student.
-Then recommend 1 to 3 advisors and explain why, grounded in the retrieved faculty evidence (chunks) only.
+    First, write a short paragraph summarizing the student.
+    Then recommend 1 to 3 advisors and explain why, grounded in the retrieved faculty evidence (chunks) only.
 
-STUDENT PROFILE
-Program/emphasis: {answers[0].strip()}
-Top interests: {answers[1].strip()}
-Courses liked: {answers[2].strip()}
-Bachelor’s + undergrad projects: {answers[3].strip()}
-Strongest skills/tools: {answers[4].strip()}
-Do NOT want: {answers[5].strip()}
-Goal for grad school: {answers[6].strip()}
+    STUDENT PROFILE
+    Program/emphasis: {answers[0].strip()}
+    Top interests: {answers[1].strip()}
+    Courses liked: {answers[2].strip()}
+    Bachelor's + undergrad projects: {answers[3].strip()}
+    Strongest skills/tools: {answers[4].strip()}
+    Do NOT want: {answers[5].strip()}
+    Goal for grad school: {answers[6].strip()}
+    """
+
+
+def generate_guided_questions():
+    prompt = """
+Create exactly 7 guided interview questions for BSU CS graduate advisor matching.
+
+Return ONLY valid JSON in this shape:
+{"questions": ["q1", "q2", "q3", "q4", "q5", "q6", "q7"]}
+
+Question coverage (in order):
+1) Program/emphasis
+2) Top research interests
+3) Courses liked
+4) Bachelor's background + projects
+5) Strongest skills/tools
+6) Topics/project types to avoid
+7) Goal for grad school
+
+Keep questions concise, natural, and student-friendly.
 """
+
+    raw = st.session_state.generator.ask(prompt, history=[], use_rag=False)
+
+    try:
+        parsed = json.loads(raw)
+        questions = parsed.get("questions", []) if isinstance(parsed, dict) else []
+        if isinstance(questions, list) and len(questions) == 7 and all(isinstance(q, str) and q.strip() for q in questions):
+            return [q.strip() for q in questions]
+    except Exception:
+        pass
+
+    return GUIDED_QUESTIONS.copy()
+
+
+def assess_guided_answer(question, answer):
+    prompt = f"""
+You are validating a student's guided interview response.
+
+Question:
+{question}
+
+Student answer:
+{answer}
+
+Return ONLY valid JSON with this exact schema:
+{{
+  "is_valid": true or false,
+  "ack": "one short acknowledgement sentence",
+  "feedback": "if invalid, one short instruction to improve; if valid, empty string"
+}}
+
+Rules:
+- Mark invalid if answer is placeholder/too vague/non-informative for this question.
+- Mark valid if it provides at least meaningful directional detail for this question.
+- Keep ack neutral and accurate to the answer.
+- Do not invent facts.
+"""
+
+    raw = st.session_state.generator.ask(prompt, history=[], use_rag=False)
+
+    try:
+        parsed = json.loads(raw)
+        is_valid = bool(parsed.get("is_valid", False))
+        ack = str(parsed.get("ack", "")).strip()
+        feedback = str(parsed.get("feedback", "")).strip()
+
+        if not ack:
+            ack = "Thanks, noted."
+        if not is_valid and not feedback:
+            feedback = "Please provide a bit more specific detail for this question."
+
+        return {
+            "is_valid": is_valid,
+            "ack": ack,
+            "feedback": feedback,
+        }
+    except Exception:
+        return {
+            "is_valid": len(answer.strip()) >= 8,
+            "ack": "Thanks, noted.",
+            "feedback": "Please provide a bit more detail for this question.",
+        }
+
+
+def render_guided_progress_footer(current, total, progress_value):
+    pct = int(max(0.0, min(progress_value, 1.0)) * 100)
+    st.markdown(
+        f"""
+        <style>
+        .guided-progress-footer {{
+            position: fixed;
+            right: 1rem;
+            top: 6.5rem;
+            width: min(340px, 42vw);
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 0.5rem 0.75rem;
+            z-index: 9999;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        }}
+        .guided-progress-label {{
+            font-size: 0.85rem;
+            margin-bottom: 0.35rem;
+        }}
+        .guided-progress-track {{
+            width: 100%;
+            height: 8px;
+            background: #e5e7eb;
+            border-radius: 999px;
+            overflow: hidden;
+        }}
+        .guided-progress-fill {{
+            height: 100%;
+            width: {pct}%;
+            background: #1f77d0;
+        }}
+        </style>
+        <div class="guided-progress-footer">
+            <div class="guided-progress-label">Guided interview progress: Question {current} of {total}</div>
+            <div class="guided-progress-track">
+                <div class="guided-progress-fill"></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def start_guided_mode():
@@ -377,13 +255,17 @@ def start_guided_mode():
     st.session_state.messages = []
     st.session_state.guided_step = 0
     st.session_state.guided_answers = []
-    st.session_state.pending_followup = None
-    st.session_state.last_followup_decision = ""
-    st.session_state.last_routed_query = ""
+    st.session_state.guided_questions = generate_guided_questions()
+    st.session_state.generator.conversation_memory = {
+        "last_query": None,
+        "last_retrieved": None,
+        "pending_concept_query": None,
+        "active_faculty_name": None,
+    }
 
+    # LLM-generated introduction message (no RAG)
     intro_prompt = (
-        "You are the BSU Graduate Advisor AI.\n"
-        "Write a short welcome message for guided mode.\n"
+        "You are the BSU Graduate Advisor AI. Write a short welcome message for guided mode.\n"
         "Requirements:\n"
         "- Say you will ask 7 questions.\n"
         "- Say the goal is to recommend 1 to 3 faculty advisors.\n"
@@ -399,34 +281,31 @@ def start_guided_mode():
         )
 
     st.session_state.messages.append({"role": "assistant", "content": intro_text})
-    st.session_state.messages.append({"role": "assistant", "content": GUIDED_QUESTIONS[0]})
 
+    # Ask first guided question
+    st.session_state.messages.append({"role": "assistant", "content": st.session_state.guided_questions[0]})
+
+
+# ==================== SIDEBAR ====================
 
 def render_sidebar():
     with st.sidebar:
-        st.header("Help")
+        st.header("Not sure where to start?")
+        st.markdown(
+            """
+Not sure how to choose a graduate advisor? You are not alone.
 
-        st.session_state.debug_followups = st.toggle(
-            "Show debug",
-            value=st.session_state.debug_followups,
+This assistant helps you explore faculty and research areas, and narrow down advisor matches.
+            """
         )
-
-        if st.session_state.debug_followups:
-            st.subheader("Follow-up state")
-            st.write("Mode:", st.session_state.mode)
-            st.write("Pending:", st.session_state.pending_followup)
-            st.write("Last decision:", st.session_state.last_followup_decision)
-            st.write("Last routed query:", st.session_state.last_routed_query)
-
-        st.divider()
 
         st.markdown(
             """
-Try asking:
+**Try asking:**
 - "List all faculty with their research areas."
 - "Who works on computer vision?"
 - "Tell me about Dr. X"
-- "BSU faculty that work with deep learning"
+- "What faculty do NLP?"
             """
         )
 
@@ -440,8 +319,10 @@ Try asking:
 # ==================== WELCOME SCREEN ====================
 
 def render_welcome_screen():
-    st.markdown("### Hello. I’m your BSU advisor assistant for CS graduate students.")
-    st.markdown("Choose how you want to start:")
+    st.markdown("### Hello. I'm your BSU advisor assistant for CS graduate students.")
+    st.markdown(
+        "Choose how you want to start. Guided mode is a short interview. Ask questions mode is free-form chat."
+    )
 
     b1, b2 = st.columns(2)
 
@@ -451,14 +332,19 @@ def render_welcome_screen():
             st.rerun()
 
         st.caption(
-            "Guided mode runs a short fixed interview (7 questions), then recommends 1 to 3 advisors."
+            "Guided mode: answer 7 questions and get 1 to 3 advisor recommendations based on your profile."
         )
 
     with b2:
         if st.button("I wanna ask questions", use_container_width=True):
             st.session_state.mode = "explore"
             st.session_state.messages = []
-            st.session_state.pending_followup = None
+            st.session_state.generator.conversation_memory = {
+                "last_query": None,
+                "last_retrieved": None,
+                "pending_concept_query": None,
+                "active_faculty_name": None,
+            }
             st.session_state.messages.append(
                 {
                     "role": "assistant",
@@ -471,101 +357,100 @@ def render_welcome_screen():
             st.rerun()
 
         st.caption(
-            "Ask questions mode is free-form chat. You can switch topics anytime."
+            "Ask questions mode: jump straight into questions about faculty, topics, and advisor matching."
         )
 
 
-# ==================== CHAT RENDER ====================
+# ==================== EXPLORE CHAT UI ====================
 
-def render_messages():
-    for m in st.session_state.messages:
-        role = m.get("role")
-        content = strip_followup_tag(m.get("content", ""))
-        with st.chat_message(role):
-            st.write(content)
-
-
-# ==================== EXPLORE MODE ====================
-
-def render_explore():
+def render_chat():
     render_sidebar()
-    render_messages()
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
 
     if user_query := st.chat_input("Ask me anything about graduate advising at BSU."):
-        # Route using follow-up controller (explore mode interruptible)
-        routed_query, used_pending = route_explore_message(user_query, st.session_state.messages)
-
-        # Add user message (what user typed)
         with st.chat_message("user"):
             st.write(user_query)
+
         st.session_state.messages.append({"role": "user", "content": user_query})
 
-        # Call engine with the routed query
         with st.chat_message("assistant"):
             with st.spinner("Thinking."):
                 answer = st.session_state.generator.ask(
-                    routed_query,
+                    user_query,
                     history=st.session_state.messages[:-1],
                     use_rag=True,
                 )
-            st.write(strip_followup_tag(answer))
+            st.write(answer)
 
-        # Save assistant message
         st.session_state.messages.append({"role": "assistant", "content": answer})
 
-        # Update pending follow-up state from assistant response
-        meta = detect_followup_meta_from_assistant(answer, st.session_state.messages)
-        st.session_state.pending_followup = meta
-
     st.markdown("---")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.caption("BSU CS Advisor Assistant")
-    with c2:
-        st.caption("Baseline RAG + Chunk Retrieval")
-    with c3:
-        st.caption("BoiseState.ai API")
 
 
-# ==================== GUIDED MODE (NOT INTERRUPTIBLE) ====================
+# ==================== GUIDED MODE UI ====================
 
 def render_guided():
     render_sidebar()
-    render_messages()
+
+    questions = st.session_state.guided_questions or GUIDED_QUESTIONS
+    current = min(st.session_state.guided_step + 1, len(questions))
+    total = len(questions)
+    progress_value = st.session_state.guided_step / total
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
 
     if user_answer := st.chat_input("Answer the guided question to continue."):
+        user_answer = user_answer.strip()
+        if not user_answer:
+            st.warning("Please enter an answer before continuing.")
+            return
+
+        current_question = questions[st.session_state.guided_step] if st.session_state.guided_step < len(questions) else ""
+        assessment = assess_guided_answer(current_question, user_answer)
+        if not assessment["is_valid"]:
+            st.warning(assessment["feedback"])
+            return
+
         with st.chat_message("user"):
             st.write(user_answer)
 
         st.session_state.messages.append({"role": "user", "content": user_answer})
+        st.session_state.messages.append({"role": "assistant", "content": assessment["ack"]})
 
         st.session_state.guided_answers.append(user_answer)
         st.session_state.guided_step += 1
 
-        if st.session_state.guided_step < len(GUIDED_QUESTIONS):
-            next_q = GUIDED_QUESTIONS[st.session_state.guided_step]
+        if st.session_state.guided_step < len(questions):
+            next_q = questions[st.session_state.guided_step]
             st.session_state.messages.append({"role": "assistant", "content": next_q})
             st.rerun()
 
-        if st.session_state.guided_step == len(GUIDED_QUESTIONS):
-            profile_query = build_guided_profile_query(st.session_state.guided_answers)
+        if st.session_state.guided_step == len(questions):
+            profile_text = build_student_profile_text(st.session_state.guided_answers)
 
             with st.chat_message("assistant"):
                 with st.spinner("Summarizing and finding advisor matches..."):
                     answer = st.session_state.generator.ask(
-                        profile_query,
+                        profile_text,
                         history=st.session_state.messages,
                         use_rag=True,
                     )
-                st.write(strip_followup_tag(answer))
+                st.write(answer)
 
             st.session_state.messages.append({"role": "assistant", "content": answer})
-
-            # After guided finishes, go back to explore mode and keep history
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "I can give you more information about a faculty in particular or answer other questions you might have. What would you like to do next?"
+            })
             st.session_state.mode = "explore"
-            # reset follow-up state after guided recommendation
-            st.session_state.pending_followup = detect_followup_meta_from_assistant(answer, st.session_state.messages)
             st.rerun()
+
+    render_guided_progress_footer(current, total, progress_value)
 
 
 # ==================== ROUTING ====================
@@ -575,4 +460,4 @@ if st.session_state.mode == "welcome":
 elif st.session_state.mode == "guided":
     render_guided()
 else:
-    render_explore()
+    render_chat()
